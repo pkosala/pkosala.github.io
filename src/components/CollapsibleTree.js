@@ -2,75 +2,94 @@
 import React, { useRef, useEffect, useState } from 'react';
 import * as d3 from 'd3';
 
-// Your CSV data
-const csvData = `level1,level2,leaf,asset_id,name,imageurl
-Electronics,Phones,iPhone,123,Apple iPhone,https://via.placeholder.com/100
-Electronics,Phones,Galaxy,124,Samsung Galaxy,https://via.placeholder.com/100
-Electronics,Laptops,MacBook,125,Apple MacBook,https://via.placeholder.com/100
-Electronics,Laptops,XPS,126,Dell XPS,https://via.placeholder.com/100
-Home,Kitchen,Blender,127,Ninja Blender,https://via.placeholder.com/100
-Home,Living Room,Sofa,128,Comfort Sofa,https://via.placeholder.com/100`;
-
-// Convert CSV data into a nested hierarchy object.
-function csvToHierarchy(csvData) {
-  const lines = csvData.split('\n').filter(line => line.trim() !== '');
-  const headers = lines[0].split(',').map(h => h.trim());
-  const hierarchy = {};
-
-  for (let i = 1; i < lines.length; i++) {
-    const values = lines[i].split(',').map(v => v.trim());
-    const row = headers.reduce((acc, header, index) => {
-      acc[header] = values[index];
-      return acc;
-    }, {});
-
-    const { level1, level2, leaf, asset_id, name, imageurl } = row;
-    if (!hierarchy[level1]) {
-      hierarchy[level1] = {};
-    }
-    if (!hierarchy[level1][level2]) {
-      hierarchy[level1][level2] = [];
-    }
-    hierarchy[level1][level2].push({ leaf, asset_id, name, imageurl });
+// Move this helper function outside the component to avoid dependency warnings.
+function convertToD3HierarchyRecursive(obj, name = "node") {
+  const node = { name };
+  if (Array.isArray(obj)) {
+    node.children = obj.map(item => ({
+      name: item.item_name, // use item_name for display on leaf nodes
+      ...item
+    }));
+  } else if (typeof obj === "object") {
+    node.children = Object.keys(obj).map(key =>
+      convertToD3HierarchyRecursive(obj[key], key)
+    );
   }
-  return hierarchy;
-}
-
-// Convert the hierarchy object into a D3-friendly format.
-function convertToD3Hierarchy(hierarchy) {
-  return {
-    name: "root",
-    children: Object.entries(hierarchy).map(([level1, level2Obj]) => ({
-      name: level1,
-      children: Object.entries(level2Obj).map(([level2, leaves]) => ({
-        name: level2,
-        children: leaves.map(item => ({
-          name: item.leaf,
-          ...item
-        }))
-      }))
-    }))
-  };
+  return node;
 }
 
 function CollapsibleTree() {
   const svgRef = useRef(null);
   const treeContainerRef = useRef(null);
-  // Store the entire D3 node for the selected leaf.
   const [selectedLeaf, setSelectedLeaf] = useState(null);
+  const [dataLoaded, setDataLoaded] = useState(null);
 
-  // Dummy images (simulate S3 images)
-  const dummyImages = [
-    "https://via.placeholder.com/100",
-    "https://via.placeholder.com/100",
-    "https://via.placeholder.com/100"
-  ];
-
-  // ----------------------------
-  // D3 Tree Drawing (runs only once)
-  // ----------------------------
+  // 1. Load CSV data from file and parse it
   useEffect(() => {
-    // Dimensions for the tree.
+    // In this example, the CSV is placed in src/components/data.csv.
+    // Adjust the path if you move the CSV file (for example to public/).
+    d3.csv("/data.csv").then(rawData => {
+      // Build a hierarchy object based on the classification_heirarchy field.
+      console.log("CSV loaded:", rawData);
+      console.table(rawData);
+
+      const hierarchyObj = buildHierarchy(rawData);
+      console.log("Hierarchy object:", hierarchyObj);
+      console.table(hierarchyObj);
+
+      // Convert the object into a D3-friendly hierarchy.
+      // Wrap the hierarchy with a dummy root so that the visible tree starts at the first level.
+      const d3Data = convertToD3HierarchyRecursive(hierarchyObj, "root");
+      // Remove the dummy root label.
+      const dummyRoot = { name: "ROOT", children: d3Data.children };
+      setDataLoaded(dummyRoot);
+    }).catch(error => {
+      console.error("Error loading CSV:", error);
+    });
+  }, []);
+
+  // Build a nested object from the CSV rows.
+  // Expected CSV columns: asset_id, leaf, similarity_score, item_name, classification_heirarchy
+  function buildHierarchy(data) {
+    const root = {};
+    data.forEach(row => {
+      const classification = row["classification_heirarchy"];
+      if (!classification) return;
+      // Split the classification string by "->" and trim.
+      const parts = classification.split("->").map(part => part.trim());
+      let currentLevel = root;
+      parts.forEach((part, index) => {
+        // At the final level, add the row as a leaf.
+        if (index === parts.length - 1) {
+          if (!currentLevel[part]) {
+            currentLevel[part] = [];
+          }
+          const asset_id = row.asset_id;
+          const imageurl = `https://hwajjala-simple-access.s3.amazonaws.com/hwajjala/mats_thumbnails/assets/${asset_id}.png`;
+          const asset_link = `http://roblox.com/catalog/${asset_id}`;
+          currentLevel[part].push({
+            asset_id,
+            leaf: row.leaf,
+            similarity_score: row.similarity_score,
+            item_name: row.item_name,
+            imageurl,
+            asset_link
+          });
+        } else {
+          if (!currentLevel[part]) {
+            currentLevel[part] = {};
+          }
+          currentLevel = currentLevel[part];
+        }
+      });
+    });
+    return root;
+  }
+
+  // 2. D3 Tree Drawing
+  useEffect(() => {
+    if (!dataLoaded) return; // wait for CSV load
+
     const margin = { top: 20, right: 90, bottom: 30, left: 90 };
     const containerWidth = treeContainerRef.current
       ? treeContainerRef.current.offsetWidth
@@ -78,14 +97,10 @@ function CollapsibleTree() {
     const width = containerWidth - margin.left - margin.right;
     const height = 600 - margin.top - margin.bottom;
 
-    // Clear previous SVG contents.
+    // Clear previous SVG content.
     d3.select(svgRef.current).selectAll("*").remove();
 
-    // Prepare data.
-    const hierarchyObj = csvToHierarchy(csvData);
-    const data = convertToD3Hierarchy(hierarchyObj);
-
-    // Append SVG and group.
+    // Append SVG element.
     const svg = d3.select(svgRef.current)
                   .attr("width", containerWidth)
                   .attr("height", 600)
@@ -93,14 +108,14 @@ function CollapsibleTree() {
                   .attr("transform", `translate(${margin.left},${margin.top})`);
 
     // Create the root node.
-    const root = d3.hierarchy(data, d => d.children);
+    const root = d3.hierarchy(dataLoaded, d => d.children);
     root.x0 = height / 2;
     root.y0 = 0;
 
     let i = 0;
     const duration = 750;
 
-    // Collapse node and all its children.
+    // Collapse deeper levels for branch nodes.
     function collapse(d) {
       if (d.children) {
         d._children = d.children;
@@ -109,24 +124,27 @@ function CollapsibleTree() {
       }
     }
 
-    // Initially collapse all children of the root (but not the root itself)
+    // Auto-collapse deeper levels but keep first level (children of dummy root) expanded.
     if (root.children) {
-      root.children.forEach(collapse);
+      root.children.forEach(child => {
+        if (child.children) {
+          collapse(child);
+        }
+      });
     }
 
-    // Main update function.
+    update(root);
+
     function update(source) {
       const treeLayout = d3.tree().size([height, width]);
       const treeData = treeLayout(root);
       const nodes = treeData.descendants();
       const links = treeData.descendants().slice(1);
 
-      // Fixed depth for each node.
-      nodes.forEach(d => {
-        d.y = d.depth * 180;
-      });
+      // Set fixed depth.
+      nodes.forEach(d => { d.y = d.depth * 180; });
 
-      // -------- Nodes Section --------
+      // --- Nodes Section ---
       const node = svg.selectAll('g.node')
                       .data(nodes, d => d.id || (d.id = ++i));
 
@@ -144,7 +162,7 @@ function CollapsibleTree() {
                .attr("dy", ".35em")
                .attr("x", d => d._children ? -13 : 13)
                .attr("text-anchor", d => d._children ? "end" : "start")
-               .text(d => d.data.name);
+               .text(d => d.parent ? d.data.name : "");
 
       const nodeUpdate = nodeEnter.merge(node);
 
@@ -152,7 +170,7 @@ function CollapsibleTree() {
                 .duration(duration)
                 .attr("transform", d => `translate(${d.y},${d.x})`);
 
-      // Highlight selected leaf: if this node matches the selected leaf, change stroke.
+      // Highlight the selected leaf.
       nodeUpdate.select('circle.node')
                 .attr('r', 10)
                 .style("fill", d => d._children ? "lightsteelblue" : "#fff")
@@ -160,49 +178,48 @@ function CollapsibleTree() {
                 .style("stroke-width", d => (selectedLeaf && d.id === selectedLeaf.id) ? "4px" : "3px")
                 .attr('cursor', 'pointer');
 
-      const nodeExit = node.exit().transition()
-                         .duration(duration)
-                         .attr("transform", d => `translate(${source.y},${source.x})`)
-                         .remove();
+      node.exit().transition()
+          .duration(duration)
+          .attr("transform", d => `translate(${source.y},${source.x})`)
+          .remove()
+          .select('circle')
+          .attr('r', 1e-6)
+          .select(function() {
+            // remove text as well
+            d3.select(this.parentNode).select('text').style('fill-opacity', 1e-6);
+          });
 
-      nodeExit.select('circle')
-              .attr('r', 1e-6);
-      nodeExit.select('text')
-              .style('fill-opacity', 1e-6);
+      // --- Links Section ---
+      svg.selectAll('path.link')
+         .data(links, d => d.id)
+         .enter().insert('path', "g")
+         .attr("class", "link")
+         .attr('d', d => {
+           const o = { x: source.x0, y: source.y0 };
+           return diagonal(o, o);
+         })
+         .merge(svg.selectAll('path.link'))
+         .transition()
+         .duration(duration)
+         .attr('d', d => diagonal(d, d.parent));
 
-      // -------- Links Section --------
-      const link = svg.selectAll('path.link')
-                      .data(links, d => d.id);
+      svg.selectAll('path.link')
+         .exit().transition()
+         .duration(duration)
+         .attr('d', d => {
+           const o = { x: source.x, y: source.y };
+           return diagonal(o, o);
+         })
+         .remove();
 
-      const linkEnter = link.enter().insert('path', "g")
-                            .attr("class", "link")
-                            .attr('d', d => {
-                              const o = { x: source.x0, y: source.y0 };
-                              return diagonal(o, o);
-                            });
-
-      const linkUpdate = linkEnter.merge(link);
-
-      linkUpdate.transition()
-                .duration(duration)
-                .attr('d', d => diagonal(d, d.parent));
-
-      const linkExit = link.exit().transition()
-                         .duration(duration)
-                         .attr('d', d => {
-                           const o = { x: source.x, y: source.y };
-                           return diagonal(o, o);
-                         })
-                         .remove();
-
-      // Save the old positions for transition.
+      // Save old positions for transition.
       nodes.forEach(d => {
         d.x0 = d.x;
         d.y0 = d.y;
       });
     }
 
-    // Diagonal generator for links.
+    // Generate a curved path from parent to child.
     function diagonal(d, parent) {
       const path = `M ${d.y} ${d.x}
                     C ${(d.y + parent.y) / 2} ${d.x},
@@ -212,13 +229,14 @@ function CollapsibleTree() {
     }
 
     // Toggle children on click.
+    // If node has further levels, expand/collapse it.
+    // Otherwise (leaf), show details.
     function click(event, d) {
-      // If a leaf node is clicked, do not toggle the tree; just set it as selected.
+      // If node is a leaf, highlight and show its details.
       if (!d.children && !d._children) {
         setSelectedLeaf(d);
         return;
       } else {
-        // If a branch is clicked, clear any leaf selection.
         setSelectedLeaf(null);
       }
       if (d.children) {
@@ -230,14 +248,9 @@ function CollapsibleTree() {
       }
       update(d);
     }
+  }, [dataLoaded, selectedLeaf]);
 
-    // Initial render.
-    update(root);
-  }, []); // Run once on mount
-
-  // ----------------------------
-  // Update Highlighting when selectedLeaf changes (without redrawing the whole tree)
-  // ----------------------------
+  // Update highlighting when selectedLeaf changes.
   useEffect(() => {
     d3.select(svgRef.current)
       .selectAll('circle.node')
@@ -245,9 +258,7 @@ function CollapsibleTree() {
       .style("stroke-width", d => (selectedLeaf && d.id === selectedLeaf.id) ? "4px" : "3px");
   }, [selectedLeaf]);
 
-  // ----------------------------
-  // Render
-  // ----------------------------
+  // 3. Render Layout
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       {/* Tree Section */}
@@ -262,7 +273,6 @@ function CollapsibleTree() {
       >
         <svg ref={svgRef} style={{ width: '100%', height: '600px' }}></svg>
       </div>
-
       {/* Details Panel Section */}
       {selectedLeaf && (
         <div
@@ -277,24 +287,26 @@ function CollapsibleTree() {
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <button
               onClick={() => setSelectedLeaf(null)}
-              style={{
-                fontSize: '16px',
-                padding: '2px 6px',
-                cursor: 'pointer'
-              }}
+              style={{ fontSize: '16px', padding: '2px 6px', cursor: 'pointer' }}
             >
               X
             </button>
           </div>
           <h3>{selectedLeaf.data.name}</h3>
-          <div style={{ display: 'flex', flexWrap: 'wrap' }}>
-            {dummyImages.map((img, index) => (
-              <div key={index} style={{ margin: '5px', textAlign: 'center' }}>
-                <img src={img} alt={selectedLeaf.data.name} width={100} height={100} />
-                <p style={{ fontSize: '0.8em' }}>{selectedLeaf.data.name}</p>
-              </div>
-            ))}
-          </div>
+          {selectedLeaf.data.asset_id && (
+            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+              <a href={selectedLeaf.data.asset_link} target="_blank" rel="noopener noreferrer">
+                <img src={selectedLeaf.data.imageurl} alt={selectedLeaf.data.item_name} width={100} height={100} />
+              </a>
+            </div>
+          )}
+          {selectedLeaf.data.asset_id && (
+            <p style={{ textAlign: 'center' }}>
+              <a href={selectedLeaf.data.asset_link} target="_blank" rel="noopener noreferrer">
+                View Asset
+              </a>
+            </p>
+          )}
         </div>
       )}
     </div>
